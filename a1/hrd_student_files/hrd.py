@@ -1,5 +1,6 @@
 import argparse
-import sys
+import heapq
+import itertools
 
 #====================================================================================
 
@@ -126,22 +127,30 @@ class Board:
         :return: True if the move is valid, False otherwise.
         :rtype: bool
         """
-        # Check if the new coordinates are within bounds
-        if new_x < 0 or new_y < 0 or new_x >= self.width or new_y >= self.height:
-            return False
+        destination_cells = self._piece_cells(piece, new_x, new_y)
+        for x, y in destination_cells:
+            if x < 0 or y < 0 or x >= self.width or y >= self.height:
+                return False
 
-        # Check if the target position is occupied by another piece
         for other_piece in self.pieces:
-            if other_piece != piece:
-                if (new_x == other_piece.coord_x and new_y == other_piece.coord_y) or \
-                   (other_piece.is_2_by_2 and
-                    ((new_x == other_piece.coord_x and new_y == other_piece.coord_y) or
-                     (new_x == other_piece.coord_x + 1 and new_y == other_piece.coord_y) or
-                     (new_x == other_piece.coord_x and new_y == other_piece.coord_y + 1) or
-                     (new_x == other_piece.coord_x + 1 and new_y == other_piece.coord_y + 1))):
-                    return False
+            if other_piece is piece:
+                continue
+            if set(destination_cells).intersection(self._piece_cells(other_piece)):
+                return False
         return True
-    
+
+    @staticmethod
+    def _piece_cells(piece, coord_x=None, coord_y=None):
+        x = piece.coord_x if coord_x is None else coord_x
+        y = piece.coord_y if coord_y is None else coord_y
+        if piece.is_2_by_2:
+            return [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)]
+        if piece.is_single:
+            return [(x, y)]
+        if piece.orientation == 'h':
+            return [(x, y), (x + 1, y)]
+        return [(x, y), (x, y + 1)]
+
     def generate_successors(self):
         """
         Generate all possible moves for the current board state.
@@ -156,11 +165,16 @@ class Board:
                 new_x = piece.coord_x + dx
                 new_y = piece.coord_y + dy
                 if self.is_valid_move(piece, new_x, new_y):
-                    # Create a new board state with the piece moved
-                    new_pieces = self.pieces.copy()
-                    new_piece = Piece(piece.is_2_by_2, piece.is_single, new_x, new_y, piece.orientation)
-                    new_pieces.remove(piece)
-                    new_pieces.append(new_piece)
+                    new_pieces = [
+                        Piece(
+                            existing_piece.is_2_by_2,
+                            existing_piece.is_single,
+                            new_x if existing_piece is piece else existing_piece.coord_x,
+                            new_y if existing_piece is piece else existing_piece.coord_y,
+                            existing_piece.orientation
+                        )
+                        for existing_piece in self.pieces
+                    ]
                     moves.append(Board(self.height, new_pieces))
         return moves
 
@@ -268,55 +282,195 @@ def solve_puzzle(in_file_name, out_file_name, algo):
     :type in_file_name: str
     :param out_file_name: name of file to write solution to
     :type out_file_name: str
-    :param algo: dfs or a_star
+    :param algo: dfs or astar
     :type algo: str
     """
     # read the board from the file
     board, goal_board = read_from_file(in_file_name)
 
-    #An example of how to write solutions to the outputfile. (This is not a correct solution, of course).
-    #with open(args.outputfile, 'w') as sys.stdout:
-    #    board.display()
-    #    print("")
-    #    goal_board.display()
-    if algo == 'dfs': # Use DFS and follow GSA w/ pruning pseudocode
-        from a1.hrd_student_files.dfs import dfs
-        dfs(board, goal_board, out_file_name)
-        explored = {}
-        frontier = {}
-        #TODO: Implement DFS and write the solution to the output file after finishing helper
-        
+    def heuristic(state):
+        return manhattan_distance(state, goal_board)
 
-def manhattan_distance(state):
+    initial_state = State(board, heuristic, 0, 0)
+
+    if algo == 'dfs':
+        solution = dfs(initial_state, goal_board)
+    elif algo == 'astar':
+        solution = astar(initial_state, goal_board)
+    else:
+        raise ValueError("Unsupported search algorithm: {}".format(algo))
+
+    if solution is None:
+        raise ValueError("No solution found for {}".format(in_file_name))
+
+    with open(out_file_name, "w") as output_file:
+        for state in get_solution(solution):
+            output_file.write(grid_to_string(state.board.grid))
+            output_file.write("\n")
+
+
+def _piece_shape(piece):
+    if piece.is_2_by_2:
+        return (2, 2)
+    if piece.is_single:
+        return (1, 1)
+    if piece.orientation == 'h':
+        return (2, 1)
+    return (1, 2)
+
+
+def manhattan_distance(state, goal_board):
     """
-    Calculate the Manhattan distance of the main piece to the goal position (top left corner of the board).
-    Heuristic function.
+    Calculate an admissible matching-distance heuristic for the board.
 
-    :param state: The state to calculate the Manhattan distance for.
+    Pieces with the same shape are interchangeable in the board
+    representation, so match them to goal positions at minimum total distance.
+    :param state: The state to calculate the heuristic for.
     :type state: State
-    :return: The Manhattan distance.
+    :param goal_board: The goal board.
+    :type goal_board: Board
+    :return: A lower bound on the number of moves to the goal.
     :rtype: int
     """
-    # Find the main piece (2x2 piece)
+    current_groups = {}
+    goal_groups = {}
     for piece in state.board.pieces:
-        if piece.is_2_by_2:
-            main_piece = piece
-            break
+        current_groups.setdefault(_piece_shape(piece), []).append(
+            (piece.coord_x, piece.coord_y)
+        )
+    for piece in goal_board.pieces:
+        goal_groups.setdefault(_piece_shape(piece), []).append(
+            (piece.coord_x, piece.coord_y)
+        )
 
-    # Calculate the Manhattan distance to the goal position (0, 0)
-    distance = abs(main_piece.coord_x - 0) + abs(main_piece.coord_y - 0)
-    return distance
+    if current_groups.keys() != goal_groups.keys():
+        raise ValueError("Current and goal boards have different piece shapes")
 
-def is_goal_state(state):
+    total_distance = 0
+    for shape, current_positions in current_groups.items():
+        goal_positions = goal_groups[shape]
+        if len(current_positions) != len(goal_positions):
+            raise ValueError("Current and goal boards have different piece counts")
+
+        costs = {0: 0}
+        for current_x, current_y in current_positions:
+            next_costs = {}
+            for mask, cost in costs.items():
+                for index, (goal_x, goal_y) in enumerate(goal_positions):
+                    bit = 1 << index
+                    if mask & bit:
+                        continue
+                    next_mask = mask | bit
+                    distance = abs(current_x - goal_x) + abs(current_y - goal_y)
+                    candidate = cost + distance
+                    if candidate < next_costs.get(next_mask, float("inf")):
+                        next_costs[next_mask] = candidate
+            costs = next_costs
+        total_distance += costs[(1 << len(goal_positions)) - 1]
+    return total_distance
+
+
+def is_goal_state(state, goal_board):
     """
     Check if the given state is a goal state.
 
     :param state: The state to check.
     :type state: State
+    :param goal_board: The goal board.
+    :type goal_board: Board
     :return: True if the given state is a goal state, False otherwise.
     :rtype: bool
     """
     return state.board.grid == goal_board.grid
+
+
+def _state_key(state):
+    return tuple(tuple(row) for row in state.board.grid)
+
+
+def generate_successors(state):
+    """
+    Generate child states linked to the state being expanded.
+
+    :param state: The current state.
+    :type state: State
+    :return: The legal one-move successor states.
+    :rtype: List[State]
+    """
+    return [
+        State(board, state.hfn, 0, state.depth + 1, state)
+        for board in state.board.generate_successors()
+    ]
+
+
+def _root_state(initial_state):
+    return State(initial_state.board, initial_state.hfn, 0, 0)
+
+
+def dfs(initial_state, goal_board):
+    """
+    Return the first goal state found by depth-first search, or None.
+
+    Multi-path pruning skips configurations already explored or in the frontier.
+    """
+    root = _root_state(initial_state)
+    frontier = [root]
+    frontier_keys = {_state_key(root)}
+    explored = set()
+
+    while frontier:
+        state = frontier.pop()
+        key = _state_key(state)
+        frontier_keys.remove(key)
+        if is_goal_state(state, goal_board):
+            return state
+        explored.add(key)
+
+        for successor in generate_successors(state):
+            successor_key = _state_key(successor)
+            if successor_key not in explored and successor_key not in frontier_keys:
+                frontier.append(successor)
+                frontier_keys.add(successor_key)
+    return None
+
+
+def astar(initial_state, goal_board):
+    """
+    Return an optimal goal state found by A* search, or None if unreachable.
+    """
+    root = _root_state(initial_state)
+    if root.hfn is None:
+        raise ValueError("A* search requires a heuristic function")
+    root.f = root.hfn(root)
+    counter = itertools.count()
+    frontier = [(root.f, 0, next(counter), root)]
+    best_cost = {_state_key(root): 0}
+    expanded_cost = {}
+
+    while frontier:
+        _, cost, _, state = heapq.heappop(frontier)
+        key = _state_key(state)
+        if cost != best_cost.get(key):
+            continue
+        if cost >= expanded_cost.get(key, float("inf")):
+            continue
+        if is_goal_state(state, goal_board):
+            return state
+        expanded_cost[key] = cost
+
+        for successor in generate_successors(state):
+            successor_key = _state_key(successor)
+            successor_cost = cost + 1
+            if successor_cost >= best_cost.get(successor_key, float("inf")):
+                continue
+
+            best_cost[successor_key] = successor_cost
+            successor.f = successor_cost + successor.hfn(successor)
+            heapq.heappush(
+                frontier,
+                (successor.f, successor_cost, next(counter), successor)
+            )
+    return None
 
 
 def get_solution(goal_state):
@@ -361,4 +515,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     solve_puzzle(args.inputfile, args.outputfile, args.algo)
-
